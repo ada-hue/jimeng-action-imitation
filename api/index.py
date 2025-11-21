@@ -5,8 +5,7 @@ import hmac
 import requests
 from http.server import BaseHTTPRequestHandler
 
-# =================配置区域=================
-# 你要求的：密钥固定在代码里
+# ================= 配置区域 =================
 ACCESS_KEY = 'AKLTNDgyYmRkM2MzZTc2NDhkYTgyMGM0OWVlZmRkNWI4YTY'
 SECRET_KEY = 'WW1Zell6VTRNRFl4Tm1JeE5EUXlPRGt4WVdKbU9UWTBPVFF4TWprNE5HRQ=='
 
@@ -14,128 +13,198 @@ HOST = 'visual.volcengineapi.com'
 REGION = 'cn-north-1'
 ENDPOINT = 'https://visual.volcengineapi.com'
 SERVICE = 'cv'
-# =========================================
+# ==========================================
 
-def sign(key, msg):
+
+def sign(key: bytes, msg: str) -> bytes:
+    """HMAC-SHA256"""
     return hmac.new(key, msg.encode('utf-8'), hashlib.sha256).digest()
 
-def getSignatureKey(key, dateStamp, regionName, serviceName):
-    kDate = sign(key.encode('utf-8'), dateStamp)
-    kRegion = sign(kDate, regionName)
-    kService = sign(kRegion, serviceName)
-    kSigning = sign(kService, 'request')
-    return kSigning
 
-def formatQuery(parameters):
-    request_parameters_init = ''
-    for key in sorted(parameters):
-        request_parameters_init += key + '=' + parameters[key] + '&'
-    return request_parameters_init[:-1]
+def get_signature_key(secret_key: str, date_stamp: str, region: str, service: str) -> bytes:
+    """生成签名 key（按 volcengine 文档的流程来）"""
+    k_date = sign(secret_key.encode('utf-8'), date_stamp)
+    k_region = sign(k_date, region)
+    k_service = sign(k_region, service)
+    k_signing = sign(k_service, 'request')
+    return k_signing
 
-def call_volcengine(video_url, image_url):
-    # 构造 Query
+
+def format_query(params: dict) -> str:
+    """把 query dict 按 key 排序后拼成 querystring"""
+    return '&'.join(f'{k}={params[k]}' for k in sorted(params))
+
+
+def call_volcengine(video_url: str, image_url: str, timeout: int = 5) -> dict:
+    """调用火山引擎，返回结构化结果"""
+
+    # 1. Query
     query_params = {
         'Action': 'CVSync2AsyncSubmitTask',
         'Version': '2022-08-31',
     }
-    req_query = formatQuery(query_params)
+    req_query = format_query(query_params)
 
-    # 构造 Body
+    # 2. Body
     body_params = {
         "req_key": "jimeng_dream_actor_m1_gen_video_cv",
         "video_url": video_url,
         "image_url": image_url
     }
-    req_body = json.dumps(body_params)
+    body_str = json.dumps(body_params, ensure_ascii=False)
 
-    # 签名流程 (AWS Signature V4)
+    # 3. 签名
     method = 'POST'
-    t = datetime.datetime.utcnow()
-    current_date = t.strftime('%Y%m%dT%H%M%SZ')
-    datestamp = t.strftime('%Y%m%d')
-    
+    now = datetime.datetime.utcnow()
+    amz_date = now.strftime('%Y%m%dT%H%M%SZ')
+    date_stamp = now.strftime('%Y%m%d')
+
     canonical_uri = '/'
     canonical_querystring = req_query
-    signed_headers = 'content-type;host;x-content-sha256;x-date'
-    payload_hash = hashlib.sha256(req_body.encode('utf-8')).hexdigest()
     content_type = 'application/json'
-    
-    canonical_headers = 'content-type:' + content_type + '\n' + 'host:' + HOST + \
-                        '\n' + 'x-content-sha256:' + payload_hash + \
-                        '\n' + 'x-date:' + current_date + '\n'
-    
-    canonical_request = method + '\n' + canonical_uri + '\n' + canonical_querystring + \
-                        '\n' + canonical_headers + '\n' + signed_headers + '\n' + payload_hash
-    
-    algorithm = 'HMAC-SHA256'
-    credential_scope = datestamp + '/' + REGION + '/' + SERVICE + '/' + 'request'
-    string_to_sign = algorithm + '\n' + current_date + '\n' + credential_scope + '\n' + hashlib.sha256(
-        canonical_request.encode('utf-8')).hexdigest()
-    
-    signing_key = getSignatureKey(SECRET_KEY, datestamp, REGION, SERVICE)
-    signature = hmac.new(signing_key, (string_to_sign).encode('utf-8'), hashlib.sha256).hexdigest()
-    
-    authorization_header = algorithm + ' ' + 'Credential=' + ACCESS_KEY + '/' + \
-                           credential_scope + ', ' + 'SignedHeaders=' + \
-                           signed_headers + ', ' + 'Signature=' + signature
-                           
-    headers = {
-        'X-Date': current_date,
-        'Authorization': authorization_header,
-        'X-Content-Sha256': payload_hash,
-        'Content-Type': content_type
-    }
-    
-    request_url = ENDPOINT + '?' + req_query
-    
-    try:
-        # 发起请求
-        r = requests.post(request_url, headers=headers, data=req_body)
-        # 返回结果
-        try:
-            return r.json(), r.status_code
-        except:
-            return {"raw_response": r.text}, r.status_code
-    except Exception as e:
-        return {"error": str(e)}, 500
+    payload_hash = hashlib.sha256(body_str.encode('utf-8')).hexdigest()
+    signed_headers = 'content-type;host;x-content-sha256;x-date'
 
-# Vercel 的入口 Handler
+    canonical_headers = (
+        f'content-type:{content_type}\n'
+        f'host:{HOST}\n'
+        f'x-content-sha256:{payload_hash}\n'
+        f'x-date:{amz_date}\n'
+    )
+
+    canonical_request = (
+        f'{method}\n'
+        f'{canonical_uri}\n'
+        f'{canonical_querystring}\n'
+        f'{canonical_headers}\n'
+        f'{signed_headers}\n'
+        f'{payload_hash}'
+    )
+
+    algorithm = 'HMAC-SHA256'
+    credential_scope = f'{date_stamp}/{REGION}/{SERVICE}/request'
+    string_to_sign = (
+        f'{algorithm}\n'
+        f'{amz_date}\n'
+        f'{credential_scope}\n'
+        f'{hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()}'
+    )
+
+    signing_key = get_signature_key(SECRET_KEY, date_stamp, REGION, SERVICE)
+    signature = hmac.new(signing_key, string_to_sign.encode('utf-8'), hashlib.sha256).hexdigest()
+
+    auth_header = (
+        f'{algorithm} '
+        f'Credential={ACCESS_KEY}/{credential_scope}, '
+        f'SignedHeaders={signed_headers}, '
+        f'Signature={signature}'
+    )
+
+    headers = {
+        'X-Date': amz_date,
+        'Authorization': auth_header,
+        'X-Content-Sha256': payload_hash,
+        'Content-Type': content_type,
+    }
+
+    url = f'{ENDPOINT}?{req_query}'
+
+    try:
+        # ⭐ 关键：加 timeout，避免无限等待拖成飞书超时
+        resp = requests.post(url, headers=headers, data=body_str, timeout=timeout)
+
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"raw_response": resp.text}
+
+        return {
+            "ok": resp.ok,
+            "status": resp.status_code,
+            "data": data,
+        }
+
+    except requests.exceptions.Timeout:
+        return {
+            "ok": False,
+            "status": 504,
+            "data": {"error": "volcengine request timeout"},
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "status": 500,
+            "data": {"error": str(e)},
+        }
+
+
 class handler(BaseHTTPRequestHandler):
+    """Vercel Python Runtime 入口"""
+
     def do_POST(self):
         try:
-            # 1. 获取请求长度
-            content_length = int(self.headers.get('Content-Length', 0))
-            if content_length == 0:
-                 self.send_error_response(400, "Empty body")
-                 return
+            content_length = int(self.headers.get('Content-Length', '0'))
+            if content_length <= 0:
+                return self._send_json(200, {
+                    "code": 1,
+                    "msg": "Empty body",
+                    "data": None
+                })
 
-            # 2. 读取飞书发来的数据
-            post_data = self.rfile.read(content_length)
-            data = json.loads(post_data.decode('utf-8'))
-            
-            # 3. 提取字段 (这里需要根据飞书多维表格里你定义的参数名来)
-            # 假设飞书发过来的 JSON 里有 video_url 和 image_url 字段
-            v_url = data.get('video_url')
-            i_url = data.get('image_url')
+            raw_body = self.rfile.read(content_length)
+            print("feishu raw body:", raw_body)  # 方便在 Vercel Logs 里调试
 
-            if not v_url or not i_url:
-                self.send_error_response(400, "Missing video_url or image_url in request body")
-                return
+            try:
+                body = json.loads(raw_body.decode('utf-8'))
+            except Exception:
+                return self._send_json(200, {
+                    "code": 1,
+                    "msg": "Invalid JSON body",
+                    "data": None
+                })
 
-            # 4. 调用火山引擎
-            result, status_code = call_volcengine(v_url, i_url)
+            # 从飞书请求里拿视频 / 图片链接
+            video_url = body.get('video_url')
+            image_url = body.get('image_url')
 
-            # 5. 返回结果给飞书
-            self.send_response(status_code)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps(result).encode('utf-8'))
+            if not video_url or not image_url:
+                return self._send_json(200, {
+                    "code": 1,
+                    "msg": "Missing video_url or image_url",
+                    "data": body  # 顺便把原始 body 返回方便你排查
+                })
+
+            # 调用火山引擎
+            volc_result = call_volcengine(video_url, image_url)
+
+            # 统一对飞书返回 200，结果用 code/msg 表示
+            resp_body = {
+                "code": 0 if volc_result["ok"] else 1,
+                "msg": "ok" if volc_result["ok"] else "volcengine error",
+                "http_status": volc_result["status"],
+                "data": volc_result["data"],
+            }
+
+            return self._send_json(200, resp_body)
 
         except Exception as e:
-            self.send_error_response(500, str(e))
+            print("internal error:", e)
+            return self._send_json(200, {
+                "code": 1,
+                "msg": f"internal error: {e}",
+                "data": None
+            })
 
-    def send_error_response(self, code, message):
-        self.send_response(code)
-        self.send_header('Content-type', 'application/json')
+    def do_GET(self):
+        """浏览器直接访问 /api 时的简单健康检查"""
+        return self._send_json(200, {
+            "code": 0,
+            "msg": "ok",
+            "data": "python function alive"
+        })
+
+    def _send_json(self, status_code: int, body: dict):
+        self.send_response(status_code)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.end_headers()
-        self.wfile.write(json.dumps({"error": message}).encode('utf-8'))
+        self.wfile.write(json.dumps(body, ensure_ascii=False).encode('utf-8'))
